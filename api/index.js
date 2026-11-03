@@ -7,15 +7,16 @@ const http = require('http');
 
 const REFERER = 'https://vidlink.pro/';
 const ORIGIN  = 'https://vidlink.pro';
-const UA      = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124';
+const UA      = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
-// ── WASM singleton (survives warm invocations) ────────────────────────────────
+// ── WASM singleton (sobrevive a invocações quentes / warm invocations) ──
 let wasmReady = false;
 let bootPromise = null;
 
 function bootWasm() {
   if (bootPromise) return bootPromise;
   bootPromise = (async () => {
+    // Definir ambiente global simulado para o WebAssembly e libsodium
     globalThis.window = globalThis;
     globalThis.self = globalThis;
     globalThis.document = { createElement: () => ({}), body: { appendChild: () => {} } };
@@ -24,21 +25,29 @@ function bootWasm() {
     await sodium.ready;
     globalThis.sodium = sodium;
 
-    eval(fs.readFileSync(path.join(__dirname, 'script.js'), 'utf8'));
+    // Carregar script.js usando caminhos absolutos seguros
+    const scriptPath = path.resolve(__dirname, 'script.js');
+    const scriptContent = fs.readFileSync(scriptPath, 'utf8');
+    eval(scriptContent);
 
+    // Inicializar Dm e carregar o binário fu.wasm
     const go = new Dm();
-    const wasmBuf = fs.readFileSync(path.join(__dirname, 'fu.wasm'));
+    const wasmPath = path.resolve(__dirname, 'fu.wasm');
+    const wasmBuf = fs.readFileSync(wasmPath);
+    
     const { instance } = await WebAssembly.instantiate(wasmBuf, go.importObject);
     go.run(instance);
 
     await new Promise(r => setTimeout(r, 500));
-    if (typeof globalThis.getAdv !== 'function') throw new Error('getAdv not found after WASM boot');
+    if (typeof globalThis.getAdv !== 'function') {
+      throw new Error('getAdv not found after WASM boot');
+    }
     wasmReady = true;
   })();
   return bootPromise;
 }
 
-// ── Stream URL resolver ───────────────────────────────────────────────────────
+// ── Resolvedor de URLs de Streaming ──────────────────────────────────────────
 async function getStream(id, season, episode) {
   await bootWasm();
   const token = globalThis.getAdv(String(id));
@@ -58,7 +67,7 @@ async function getStream(id, season, episode) {
   return playlist;
 }
 
-// ── HLS upstream fetcher with redirect support ────────────────────────────────
+// ── Fetcher HLS Upstream com suporte a redirecionamentos ───────────────────────
 function fetchUpstream(url, redirects = 0) {
   return new Promise((resolve, reject) => {
     if (redirects > 5) return reject(new Error('too many redirects'));
@@ -86,14 +95,23 @@ function rewriteM3u8(body, url) {
   }).join('\n');
 }
 
-// ── Vercel serverless handler ─────────────────────────────────────────────────
+// ── Handler Serverless para a Vercel ─────────────────────────────────────────
 module.exports = async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
-  const { searchParams } = new URL(req.url, 'http://localhost');
+  if (req.method === 'OPTIONS') {
+    return res.status(200).end();
+  }
+
+  // Obter parâmetros da query string de forma segura
+  const protocol = req.headers['x-forwarded-proto'] || 'http';
+  const host = req.headers['host'] || 'localhost';
+  const { searchParams } = new URL(req.url, `${protocol}://${host}`);
   const q = Object.fromEntries(searchParams);
 
-  // Proxy mode: /api?url=...
+  // Modo Proxy: /api?url=...
   if (q.url) {
     const url = decodeURIComponent(q.url);
     try {
@@ -120,7 +138,7 @@ module.exports = async function handler(req, res) {
     return;
   }
 
-  // Stream lookup: /api?id=550  or  /api?id=456&s=1&e=2
+  // Pesquisa de Stream: /api?id=550 ou /api?id=456&s=1&e=2
   if (!q.id) {
     res.statusCode = 400;
     res.setHeader('Content-Type', 'application/json');
